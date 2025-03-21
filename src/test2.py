@@ -1,18 +1,64 @@
 import os
-import os
-from pathlib import Path
-# Get the current file's directory and navigate to the project root
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-os.chdir(PROJECT_ROOT)
-from dotenv import load_dotenv
-load_dotenv()
 import mimetypes
+import boto3
+import json
+from botocore.exceptions import ClientError
+
+
+
+bedrock_client = boto3.client('bedrock-runtime', region_name='us-west-2')
+
+model_id = "us.meta.llama3-2-3b-instruct-v1:0"
 
 
 
 
 
-def create_file_tree_with_contents(directory, output_file='tmp/file_tree.txt'):
+def create_file_tree_with_contents(directory, output_file='file_tree.txt'):
+    def summarize(file_content):
+        # Invoke the model to summarize the code provided into a smaller snippet
+        prompt = """## Instruction
+Your task is to summarize the given code in the <code> </code> tags into a concise description that captures all the key features and functionality, while omitting any unnecessary or redundant information.
+
+To produce an effective summary, please follow these guidelines:
+
+### Code Summarization Guidelines
+- Read through the code carefully to understand its purpose, logic flow, and implementation details.
+- Identify the core algorithms, data structures, and programming concepts used in the code.
+- Determine the main features and functionalities provided by the code.
+- Describe the code's inputs, outputs, and any important parameters or configurations.
+- Explain any key design patterns, optimization techniques, or performance considerations implemented.
+- Use clear and concise language to convey the essential information about the code's behavior and capabilities.
+- Avoid including minor implementation details, comments, or code snippets unless they are crucial for understanding the overall functionality.
+
+### Code to Summarize
+<code>""" + file_content +  """</code>"""
+        # Embed the prompt in Llama 3's instruction format.
+        formatted_prompt = f"""
+        <|begin_of_text|><|start_header_id|>user<|end_header_id|>
+        {prompt}
+        <|eot_id|>
+        <|start_header_id|>assistant<|end_header_id|>       
+        """
+        # Format the request payload using the model's native structure.
+        native_request = {
+            "prompt": formatted_prompt,
+            "max_gen_len": 512,
+            "temperature": 0.5,
+        }
+        # Convert the native request to JSON.
+        request = json.dumps(native_request)
+        try:
+            # Invoke the model with the request.
+            response = bedrock_client.invoke_model(modelId=model_id, body=request)
+            # Decode the response body.
+            model_response = json.loads(response["body"].read())
+            # Extract and print the response text.
+            response_text = model_response["generation"]
+            return response_text
+        except (ClientError, Exception) as e:
+            return f"ERROR: Can't invoke '{model_id}'. Reason: {e}"
+        exit(1)
     def is_text_file(file_path):
         text_extensions = {
             '.txt', '.md', '.py', '.js', '.java', '.c', '.cpp', '.h', '.css',
@@ -55,8 +101,9 @@ def create_file_tree_with_contents(directory, output_file='tmp/file_tree.txt'):
                         
                         with open(item_path, 'r', encoding='utf-8', errors='ignore') as f:
                             contents = f.read()
+                            summary=summarize(contents)
                             # Write the contents with proper indentation
-                            for line in contents.splitlines():
+                            for line in summary.splitlines():
                                 out_file.write(f"{prefix}{'    ' if is_last else '│   '}    {line}\n")
                          
                         # Add separator after file contents
@@ -71,4 +118,4 @@ def create_file_tree_with_contents(directory, output_file='tmp/file_tree.txt'):
         write_tree(out_file, directory)
 
 # Usage example:
-create_file_tree_with_contents('gitRagRepo')
+create_file_tree_with_contents('srcRepo')
