@@ -1,4 +1,11 @@
 import os
+import os
+from pathlib import Path
+# Get the current file's directory and navigate to the project root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+os.chdir(PROJECT_ROOT)
+from dotenv import load_dotenv
+load_dotenv()
 import mimetypes
 
 
