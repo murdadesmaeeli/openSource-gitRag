@@ -6,11 +6,12 @@ import pandas as pd
 import nest_asyncio
 import logging
 import time
- 
+from dotenv import load_dotenv
+load_dotenv 
  
 headers = {
     "Content-Type": "application/json",
-    "api-key": API_KEY,
+    "api-key": os.getenv('OPENAI_API_KEY'),
 }
 
 # Token Rate Limit Configuration

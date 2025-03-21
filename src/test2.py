@@ -43,4 +43,4 @@ def create_file_tree_with_contents(directory, output_file='file_tree.txt'):
         write_tree(out_file, directory)
 
 # Usage example:
-create_file_tree_with_contents('srcRepo')
+create_file_tree_with_contents('src')
