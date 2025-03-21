@@ -12,7 +12,7 @@ import mimetypes
 
 
 
-def create_file_tree_with_contents(directory, output_file='file_tree.txt'):
+def create_file_tree_with_contents(directory, output_file='tmp/file_tree.txt'):
     def is_text_file(file_path):
         text_extensions = {
             '.txt', '.md', '.py', '.js', '.java', '.c', '.cpp', '.h', '.css',
@@ -71,4 +71,4 @@ def create_file_tree_with_contents(directory, output_file='file_tree.txt'):
         write_tree(out_file, directory)
 
 # Usage example:
-create_file_tree_with_contents('srcRepo')
+create_file_tree_with_contents('gitRagRepo')

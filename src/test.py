@@ -5,37 +5,42 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 from dotenv import load_dotenv
 load_dotenv()
+import os
 import json
-import aiohttp
 import asyncio
-import pandas as pd
 import nest_asyncio
 import logging
 import time
- 
-headers = {
-    "Content-Type": "application/json",
-    "api-key": os.getenv('OPENAI_API_KEY'),
-}
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+
+# Load environment variables
+load_dotenv()
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+
+# Initialize OpenAI async client
+client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'),base_url=os.getenv('BASE_URL'))
 
 # Token Rate Limit Configuration
+# token_limit_per_minute = 2000000
 token_limit_per_minute = 2000000
+char_limit=200000
 token_counter = []
 token_counter_time_window = 60  # seconds
 
-# Function to chunk text into segments of 42,000 words
-def chunk_text(text, word_limit=25000):
-    words = text.split()
-    for i in range(0, len(words), word_limit):
-        yield ' '.join(words[i:i + word_limit])
+# Chunk text by characters
+def chunk_text_by_characters(text, char_limit=char_limit):
+    for i in range(0, len(text), char_limit):
+        yield text[i:i + char_limit]
 
-# Function to enforce rate limiting
+# Rate limiting enforcement
 async def enforce_rate_limit():
     current_time = time.time()
-    # Remove tokens older than 60 seconds
     while token_counter and token_counter[0] < current_time - token_counter_time_window:
         token_counter.pop(0)
-    # Calculate total tokens in the last minute
+
     if len(token_counter) >= token_limit_per_minute:
         earliest_token_time = token_counter[0]
         sleep_time = (earliest_token_time + token_counter_time_window) - current_time
@@ -43,106 +48,82 @@ async def enforce_rate_limit():
             logging.info(f"Rate limit approaching. Sleeping for {sleep_time:.2f} seconds.")
             await asyncio.sleep(sleep_time)
 
-# Asynchronous function to call the GPT-4 API
-async def call_gpt4(session, question, text_chunk,max_retries=5):
-    # Construct the prompt with the user-provided question
+# GPT-4 API Call
+async def call_gpt4(question, text_chunk, max_retries=5):
     prompt = f"""
-    You are going to look at the file contents in separate big chunks 
-    based on the chunks that are returned that files that might need change based on the goal/question that 
-    you get. Return a JSON with key "response" and the value is a list of strings that are full relative paths
-    to the files being referenced. the path should start with srcRepo
+    You are going to look at the file contents in separate chunks based on the chunks that are returned. 
+    Return a JSON with key \"response\" containing a list of file paths starting with 'srcRepo'.
 
     Goal/Question: {question}
 
     Context:
     {text_chunk}
     """
-    
-    payload = {
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "temperature": 0,
-        "top_p": 0.95,
-        "response_format": {"type":"json_object"}
-    }
+
     retries = 0
     while retries <= max_retries:
-        await enforce_rate_limit()  # Check the rate limit before making the API call
-        
+        await enforce_rate_limit()
         try:
-            async with session.post(ENDPOINT, headers=headers, json=payload) as response:
-                if response.status == 429:
-                    retries += 1
-                    retry_after = response.headers.get("Retry-After")
-                    sleep_time = float(retry_after) if retry_after else 2 ** retries
-                    logging.warning(f"Received 429 Too Many Requests. Retrying after {sleep_time} seconds...")
-                    await asyncio.sleep(sleep_time)
-                    continue
-                
-                response_json = await response.json()
-                logging.debug(json.dumps(response_json, indent=2))
-                
-                if 'choices' in response_json:
-                    # Update token usage
-                    usage = response_json.get('usage', {})
-                    total_tokens_used = usage.get('total_tokens', 0)
-                    token_counter.extend([time.time()] * total_tokens_used)
-                    
-                    return json.loads(response_json['choices'][0]['message']['content'])
-                else:
-                    logging.error("Unexpected response format: 'choices' key missing.")
-                    logging.error(f"Response content: {response_json}")
-                    return None
-                
-        except aiohttp.ClientError as e:
-            logging.error(f"HTTP error occurred: {e}")
-        except json.JSONDecodeError as e:
-            logging.error(f"JSON decode error: {e}")
+            response = await client.chat.completions.create(
+                # model="gpt-4o",
+                model="us.amazon.nova-micro-v1:0",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                top_p=0.95,
+                response_format={"type": "json_object"}
+            )
+
+            usage = response.usage
+            total_tokens_used = usage.total_tokens
+            token_counter.extend([time.time()] * total_tokens_used)
+            return json.loads(response.choices[0].message.content)
+
         except Exception as e:
             logging.error(f"Unexpected error: {e}")
-        
+
         retries += 1
+        sleep_time = 2 ** retries
+        logging.warning(f"Retrying after {sleep_time} seconds...")
+        await asyncio.sleep(sleep_time)
 
     logging.error("Max retries exceeded.")
     return None
 
-# Asynchronous function to process all text chunks
-async def process_text_chunks(question, text_chunks):
-    async with aiohttp.ClientSession() as session:
-        tasks = [call_gpt4(session, question, chunk) for chunk in text_chunks]
-        return await asyncio.gather(*tasks)
+# Process chunks asynchronously with concurrency control
+async def process_text_chunks(question, text_chunks, max_concurrent_requests=(token_limit_per_minute//char_limit)-1):
+    semaphore = asyncio.Semaphore(max_concurrent_requests)
 
-# Main function to read file, chunk it, and process each chunk
+    async def sem_task(chunk):
+        async with semaphore:
+            return await call_gpt4(question, chunk)
+
+    tasks = [sem_task(chunk) for chunk in text_chunks]
+    return await asyncio.gather(*tasks)
+
+# Main execution
 async def main(question):
+    input_file = 'tmp/file_tree.txt'
     try:
-        # Read your input text file
-        with open('cleaned_file_tree.txt', 'r',encoding='utf-8') as file:
+        with open(input_file, 'r', encoding='utf-8') as file:
             text = file.read()
-        
-        # Chunk the text
-        text_chunks = list(chunk_text(text))
-        
-        # Process each chunk asynchronously
+
+        text_chunks = list(chunk_text_by_characters(text, char_limit=128000))
         results = await process_text_chunks(question, text_chunks)
-        
-        # Save the results to a JSON file
+
         with open('results.json', 'w') as f:
             json.dump(results, f, indent=2)
+
         logging.info("Processing complete. Results saved to 'results.json'.")
+
     except FileNotFoundError:
-        logging.error("Input file 'file_tree.txt' not found.")
+        logging.error(f"Input file '{input_file}' not found.")
     except Exception as e:
         logging.error(f"An error occurred: {e}")
 
-# Apply nest_asyncio to handle nested async calls in some environments
+# Apply nest_asyncio for environments like Jupyter
 nest_asyncio.apply()
 
-# Example question from the user
-user_question = "Which files need updates based on the new security guidelines?"
-
-# Run the main function with the user's question
+# Example usage
+user_question = "how to get current month cloud costs with boto3 sdk?"
 asyncio.run(main(user_question))
+
